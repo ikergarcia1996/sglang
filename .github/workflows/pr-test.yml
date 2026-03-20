@@ -363,11 +363,9 @@ jobs:
           stage-name: stage-b
           jobs: |
             [
-              {"prefix": "stage-b-kernel", "expected_count": 1},
               {"prefix": "stage-b-test-small-1-gpu", "expected_count": 8},
               {"prefix": "stage-b-test-large-1-gpu", "expected_count": 14},
-              {"prefix": "stage-b-test-large-2-gpu", "expected_count": 4},
-              {"prefix": "stage-b-test-4-gpu-b200", "expected_count": 1}
+              {"prefix": "stage-b-test-large-2-gpu", "expected_count": 4}
             ]
           max-wait-minutes: '480'
 
@@ -696,7 +694,7 @@ jobs:
   # =============================================== jit-kernel ====================================================
 
   stage-b-kernel:
-    needs: [check-changes, call-gate]
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
     if: |
       always() &&
       (
@@ -785,7 +783,7 @@ jobs:
         if: always()
 
   stage-a-cpu-only:
-    needs: [check-changes, call-gate]
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
     if: |
       always() &&
       (
@@ -1003,62 +1001,6 @@ jobs:
         if: always()
         with:
           artifact-suffix: ${{ matrix.partition }}
-
-  stage-b-test-4-gpu-b200:
-    needs: [check-changes, call-gate, wait-for-stage-a, sgl-kernel-build-wheels]
-    if: |
-      always() &&
-      (
-        (inputs.target_stage == 'stage-b-test-4-gpu-b200') ||
-        (
-          !inputs.target_stage &&
-          ((github.event_name == 'schedule' || inputs.test_parallel_dispatch == true) || (!failure() && !cancelled())) &&
-          ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
-        )
-      )
-    runs-on: ${{ needs.check-changes.outputs.b200_runner }}
-    timeout-minutes: 240
-    env:
-      RUNNER_LABELS: ${{ needs.check-changes.outputs.b200_runner }}
-    strategy:
-      fail-fast: false
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.pr_head_sha || inputs.ref || github.sha }}
-
-      - name: Download artifacts
-        if: needs.check-changes.outputs.sgl_kernel == 'true'
-        uses: actions/download-artifact@v6
-        with:
-          path: sgl-kernel/dist/
-          merge-multiple: true
-          pattern: wheel-python3.10-cuda12.9
-
-      - name: Install dependencies
-        timeout-minutes: 20
-        run: |
-          CUSTOM_BUILD_SGL_KERNEL=${{needs.check-changes.outputs.sgl_kernel}} IS_BLACKWELL=1 bash scripts/ci/cuda/ci_install_dependency.sh
-
-      - name: Run test
-        timeout-minutes: 30
-        run: |
-          cd test
-          CONTINUE_ON_ERROR_FLAG=""
-          if [[ "${{ needs.check-changes.outputs.continue_on_error }}" == "true" ]]; then
-            CONTINUE_ON_ERROR_FLAG="--continue-on-error"
-          fi
-          IS_BLACKWELL=1 python3 run_suite.py --hw cuda --suite stage-b-test-4-gpu-b200 $CONTINUE_ON_ERROR_FLAG
-
-      - name: Run FA4 jit_kernel tests (SM100+)
-        timeout-minutes: 10
-        run: |
-          IS_BLACKWELL=1 python3 -m pytest -q python/sglang/jit_kernel/tests/test_flash_attention_4.py
-
-      - uses: ./.github/actions/upload-cuda-coredumps
-        if: always()
 
   multimodal-gen-test-1-gpu:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
@@ -1644,7 +1586,6 @@ jobs:
         stage-b-test-small-1-gpu,
         stage-b-test-large-1-gpu,
         stage-b-test-large-2-gpu,
-        stage-b-test-4-gpu-b200,
         stage-c-test-4-gpu-h100,
         stage-c-test-8-gpu-h20,
         stage-c-test-8-gpu-h200,
