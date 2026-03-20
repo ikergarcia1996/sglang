@@ -365,15 +365,11 @@ class HybridRadixCache(BasePrefixCache):
             # Free unaligned tail
             self.token_to_kv_pool_allocator.free(kv_indices[page_aligned_len:])
         else:
-            self.token_to_kv_pool_allocator.free(
-                kv_indices[req.cache_protected_len :]
-            )
+            self.token_to_kv_pool_allocator.free(kv_indices[req.cache_protected_len :])
 
         self.dec_lock_ref(
             req.last_node,
-            DecLockRefParams(
-                swa_uuid_for_lock=getattr(req, "swa_uuid_for_lock", None)
-            ),
+            DecLockRefParams(swa_uuid_for_lock=getattr(req, "swa_uuid_for_lock", None)),
         )
 
         # cleanup
@@ -398,9 +394,7 @@ class HybridRadixCache(BasePrefixCache):
         insert_params = InsertParams(prev_prefix_len=req.cache_protected_len)
         effective_cache_len = len(token_ids)
         for comp in self.components.values():
-            cl = comp.prepare_for_caching_req(
-                req, insert_params, len(token_ids), False
-            )
+            cl = comp.prepare_for_caching_req(req, insert_params, len(token_ids), False)
             if cl is not None:
                 effective_cache_len = min(effective_cache_len, cl)
 
@@ -439,9 +433,7 @@ class HybridRadixCache(BasePrefixCache):
 
         self.dec_lock_ref(
             req.last_node,
-            DecLockRefParams(
-                swa_uuid_for_lock=getattr(req, "swa_uuid_for_lock", None)
-            ),
+            DecLockRefParams(swa_uuid_for_lock=getattr(req, "swa_uuid_for_lock", None)),
         )
         lock_result = self.inc_lock_ref(new_last_node)
 
@@ -848,9 +840,7 @@ class HybridMambaRadixCache(HybridRadixCache):
 
 class HybridSWARadixCache(HybridRadixCache):
     def __init__(self, params: CacheInitParams):
-        assert isinstance(
-            params.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator
-        )
+        assert isinstance(params.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator)
         super().__init__(
             params,
             component_names=(ComponentName.SWA,),

@@ -216,8 +216,8 @@ class MambaComponent(TreeComponent):
             )
             if mamba_value_forked is None:
                 self.cache.evict(EvictParams(num_tokens=0, mamba_num=1))
-                mamba_value_forked = (
-                    self.cache.req_to_token_pool.mamba_pool.fork_from(mamba_value)
+                mamba_value_forked = self.cache.req_to_token_pool.mamba_pool.fork_from(
+                    mamba_value
                 )
                 assert mamba_value_forked is not None, "Can not alloc mamba cache"
             insert_params.mamba_value = mamba_value_forked
@@ -235,10 +235,8 @@ class MambaComponent(TreeComponent):
                 insert_result.mamba_exist if insert_result is not None else True
             )
             if self.cache.enable_mamba_extra_buffer:
-                keep_idx = (
-                    self.cache.req_to_token_pool.get_mamba_ping_pong_other_idx(
-                        req.mamba_next_track_idx
-                    )
+                keep_idx = self.cache.req_to_token_pool.get_mamba_ping_pong_other_idx(
+                    req.mamba_next_track_idx
                 )
             else:
                 keep_idx = None
@@ -253,7 +251,5 @@ class MambaComponent(TreeComponent):
                 )
         else:
             if insert_result is not None and insert_result.mamba_exist:
-                self.cache.req_to_token_pool.mamba_pool.free(
-                    insert_params.mamba_value
-                )
+                self.cache.req_to_token_pool.mamba_pool.free(insert_params.mamba_value)
             req.mamba_last_track_seqlen = None
