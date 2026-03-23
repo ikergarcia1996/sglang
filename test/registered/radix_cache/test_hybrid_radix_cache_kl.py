@@ -12,6 +12,7 @@ from sglang.test.kl_test_utils import (
 )
 from sglang.test.test_utils import (
     DEFAULT_HYBRID_MAMBA_MODEL_NAME_FOR_TEST,
+    DEFAULT_MODEL_NAME_FOR_TEST_MXFP4_WITH_MOE,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     find_available_port,
     flush_cache_with_retry,
@@ -20,39 +21,25 @@ from sglang.test.test_utils import (
 
 register_cuda_ci(est_time=900, suite="stage-c-test-2gpu-h200")
 
+# Mamba cache parameters (must match server --mamba-track-interval / chunk_size)
 MAMBA_CACHE_CHUNK_SIZE = 64
 MAMBA_TRACK_INTERVAL = 16
-TRACK_BOUNDARY_TRIM_LENS = [16, 32, 48, 64]
-DECODE_SUFFIX_LENS = [24, 32, 40, 48]
-MULTITURN_SHARED_PREFIX_BASE = 640
-MULTITURN_SHARED_PREFIX_STEP = 32
-MULTITURN_TURN1_BRANCH_LENS = [160, 192, 224]
-MULTITURN_TURN2_BRANCH_LENS = [48, 64, 80]
 
 
-class MambaReplayKLMixin:
-    model = DEFAULT_HYBRID_MAMBA_MODEL_NAME_FOR_TEST
+class HybridReplayKLMixinBase:
+    model = None
     timeout = DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH
-    kl_div_thres = 0.0025
-    max_samples = 50
-    prefill_max_new_tokens = 256
-    decode_max_new_tokens = 256
-    replay_batch_size = 2
-    other_args = [
-        "--tp-size",
-        "2",
-        "--chunked-prefill-size",
-        "2048",
-        "--mamba-scheduler-strategy",
-        "extra_buffer",
-        "--mamba-track-interval",
-        "16",
-        "--enable-hybrid-radix-tree",
-    ]
+    kl_div_thres = None
+    max_samples = None
+    prefill_max_new_tokens = None
+    decode_max_new_tokens = None
+    replay_batch_size = 1
+    server_port_start = 32000
+    other_args = []
 
     @classmethod
     def setUpClass(cls):
-        port = find_available_port(32000)
+        port = find_available_port(cls.server_port_start)
         cls.base_url = f"http://127.0.0.1:{port}"
         cls.process = popen_launch_server(
             cls.model,
@@ -71,6 +58,14 @@ class MambaReplayKLMixin:
     @classmethod
     def _acc_thresholds(cls):
         return {cls.model: {"kl_div": cls.kl_div_thres}}
+
+    @classmethod
+    def _expected_prefill_cached_tokens(cls, prefix_len: int) -> int:
+        return prefix_len
+
+    @classmethod
+    def _expected_decode_cached_tokens(cls, history_len: int, output_len: int) -> int:
+        return history_len + output_len
 
     def flush_cache(self):
         assert flush_cache_with_retry(self.base_url)
@@ -108,24 +103,6 @@ class MambaReplayKLMixin:
             expected_upper_bound,
             f"{label}: expected cached_tokens <= {expected_upper_bound}, got {cached_tokens}",
         )
-
-    def _assert_cold_replay(self, result: dict, label: str):
-        self.assertEqual(
-            result["meta_info"]["cached_tokens"],
-            0,
-            f"{label}: replay path should be cold after flush",
-        )
-
-    @staticmethod
-    def _expected_prefill_cached_tokens(prefix_len: int) -> int:
-        return (prefix_len // MAMBA_CACHE_CHUNK_SIZE) * MAMBA_CACHE_CHUNK_SIZE
-
-    @staticmethod
-    def _expected_decode_cached_tokens(history_len: int, output_len: int) -> int:
-        if output_len <= 0:
-            return history_len
-        seq_len = history_len + output_len - 1
-        return (seq_len // MAMBA_TRACK_INTERVAL) * MAMBA_TRACK_INTERVAL
 
     def _get_input_logprobs_batched(
         self, new_input_ids: list[list[int]], output_logprobs: list[list[float]]
@@ -166,17 +143,47 @@ class MambaReplayKLMixin:
     ) -> tuple[list[int], list[float]]:
         return prompt_input_ids + result["output_ids"], _extract_output_logprobs(result)
 
+    def _assert_prefill_result(
+        self,
+        *,
+        result: dict,
+        prefix_input_ids: list[int],
+        full_input_ids: list[int],
+        label: str,
+    ) -> None:
+        expected_cached_tokens = self._expected_prefill_cached_tokens(
+            len(prefix_input_ids)
+        )
+        self._assert_exact_cached_tokens(result, expected_cached_tokens, label)
+        self._assert_cache_hit(result, expected_cached_tokens, label)
+
+    def _assert_decode_result(
+        self,
+        *,
+        result: dict,
+        history_input_ids: list[int],
+        previous_output_ids: list[int],
+        label: str,
+    ) -> None:
+        expected_cached_tokens = self._expected_decode_cached_tokens(
+            len(history_input_ids), len(previous_output_ids)
+        )
+        self._assert_exact_cached_tokens(result, expected_cached_tokens, label)
+        self._assert_cache_hit(result, expected_cached_tokens, label)
+
     @staticmethod
     def _build_prefill_boundary_inputs(
         input_ids: list[list[int]],
     ) -> tuple[list[list[int]], list[list[int]]]:
+        trim_lens = [16, 32, 48, 64]
+        full_base, full_step, min_prefix = 1700, 24, 256
         prefix_input_ids = []
         full_input_ids = []
         for i, ids in enumerate(input_ids):
-            tail_len = TRACK_BOUNDARY_TRIM_LENS[i % len(TRACK_BOUNDARY_TRIM_LENS)]
-            max_full_len = min(len(ids), 1700 + i * 24)
+            tail_len = trim_lens[i % len(trim_lens)]
+            max_full_len = min(len(ids), full_base + i * full_step)
             prefix_len = (
-                max(256, max_full_len - tail_len) // MAMBA_CACHE_CHUNK_SIZE
+                max(min_prefix, max_full_len - tail_len) // MAMBA_CACHE_CHUNK_SIZE
             ) * MAMBA_CACHE_CHUNK_SIZE
             full_len = prefix_len + tail_len
             prefix_input_ids.append(ids[:prefix_len])
@@ -187,14 +194,16 @@ class MambaReplayKLMixin:
     def _build_decode_branch_inputs(
         input_ids: list[list[int]],
     ) -> tuple[list[list[int]], list[list[int]]]:
+        base, step, min_suffix = 960, 24, 8
+        suffix_lens = [24, 32, 40, 48]
         first_turn_input_ids = []
         second_turn_suffixes = []
         for i, ids in enumerate(input_ids):
-            first_turn_len = min(len(ids), 960 + i * 24)
-            branch_suffix_len = DECODE_SUFFIX_LENS[i % len(DECODE_SUFFIX_LENS)]
+            first_turn_len = min(len(ids), base + i * step)
+            branch_suffix_len = suffix_lens[i % len(suffix_lens)]
             branch_suffix = ids[first_turn_len : first_turn_len + branch_suffix_len]
-            if len(branch_suffix) < 8:
-                branch_suffix = ids[:8]
+            if len(branch_suffix) < min_suffix:
+                branch_suffix = ids[:min_suffix]
             first_turn_input_ids.append(ids[:first_turn_len])
             second_turn_suffixes.append(branch_suffix)
         return first_turn_input_ids, second_turn_suffixes
@@ -203,33 +212,34 @@ class MambaReplayKLMixin:
     def _build_multiturn_branch_inputs(
         raw_input_ids: list[list[int]],
     ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+        prefix_base, prefix_step = 640, 32
+        turn1_lens = [160, 192, 224]
+        turn2_lens = [48, 64, 80]
+        min_t1, min_t2 = 48, 16
         shared_prefixes = []
         turn1_suffixes = []
         turn2_suffixes = []
         for group_idx in range(6):
             base_ids = raw_input_ids[group_idx * 3]
-            prefix_len = min(
-                len(base_ids),
-                MULTITURN_SHARED_PREFIX_BASE + group_idx * MULTITURN_SHARED_PREFIX_STEP,
-            )
+            prefix_len = min(len(base_ids), prefix_base + group_idx * prefix_step)
             shared_prefix = base_ids[:prefix_len]
 
             for branch_idx in range(3):
                 source_ids = raw_input_ids[group_idx * 3 + branch_idx]
                 turn1_start = min(prefix_len, max(128, len(source_ids) // 4))
-                turn1_len = MULTITURN_TURN1_BRANCH_LENS[branch_idx] + group_idx * 8
+                turn1_len = turn1_lens[branch_idx] + group_idx * 8
                 turn1_suffix = source_ids[turn1_start : turn1_start + turn1_len]
-                if len(turn1_suffix) < 48:
-                    turn1_suffix = source_ids[:48]
+                if len(turn1_suffix) < min_t1:
+                    turn1_suffix = source_ids[:min_t1]
 
                 turn2_start = min(
                     turn1_start + turn1_len,
                     max(turn1_start + 16, len(source_ids) // 2),
                 )
-                turn2_len = MULTITURN_TURN2_BRANCH_LENS[branch_idx]
+                turn2_len = turn2_lens[branch_idx]
                 turn2_suffix = source_ids[turn2_start : turn2_start + turn2_len]
-                if len(turn2_suffix) < 16:
-                    turn2_suffix = source_ids[-16:]
+                if len(turn2_suffix) < min_t2:
+                    turn2_suffix = source_ids[-min_t2:]
 
                 shared_prefixes.append(shared_prefix)
                 turn1_suffixes.append(turn1_suffix)
@@ -243,7 +253,6 @@ class MambaReplayKLMixin:
         prefix_input_ids: list[list[int]],
         full_input_ids: list[list[int]],
         max_new_tokens: int,
-        min_cached_tokens: int,
     ):
         self.flush_cache()
         _generate(self.base_url, prefix_input_ids, max_new_tokens=0)
@@ -259,15 +268,12 @@ class MambaReplayKLMixin:
         replay_input_ids = []
         output_logprobs = []
         for i, result in enumerate(results):
-            expected_cached_tokens = self._expected_prefill_cached_tokens(
-                len(prefix_input_ids[i])
+            self._assert_prefill_result(
+                result=result,
+                prefix_input_ids=prefix_input_ids[i],
+                full_input_ids=full_input_ids[i],
+                label=f"{label}[{i}]",
             )
-            self._assert_prefill_cached_tokens_near_expected(
-                result,
-                expected_cached_tokens,
-                f"{label}[{i}]",
-            )
-            self._assert_cache_hit(result, min_cached_tokens, f"{label}[{i}]")
             replay_item, output_logprobs_item = self._build_replay_item(
                 full_input_ids[i], result
             )
@@ -315,19 +321,11 @@ class MambaReplayKLMixin:
         replay_input_ids = []
         output_logprobs = []
         for i, result in enumerate(second_turn_results):
-            expected_cached_tokens = self._expected_decode_cached_tokens(
-                len(first_turn_input_ids[i]),
-                len(first_turn_results[i]["output_ids"]),
-            )
-            self._assert_exact_cached_tokens(
-                result,
-                expected_cached_tokens,
-                f"{label}[{i}]",
-            )
-            self._assert_cache_hit(
-                result,
-                expected_cached_tokens,
-                f"{label}[{i}]",
+            self._assert_decode_result(
+                result=result,
+                history_input_ids=first_turn_input_ids[i],
+                previous_output_ids=first_turn_results[i]["output_ids"],
+                label=f"{label}[{i}]",
             )
             replay_item, output_logprobs_item = self._build_replay_item(
                 second_turn_input_ids[i], result
@@ -365,18 +363,11 @@ class MambaReplayKLMixin:
         self.assertEqual(len(turn1_results), len(turn1_input_ids))
 
         for i, result in enumerate(turn1_results):
-            expected_cached_tokens = self._expected_prefill_cached_tokens(
-                len(shared_prefixes[i])
-            )
-            self._assert_exact_cached_tokens(
-                result,
-                expected_cached_tokens,
-                f"{label}[turn1][{i}]",
-            )
-            self._assert_cache_hit(
-                result,
-                expected_cached_tokens,
-                f"{label}[turn1][{i}]",
+            self._assert_prefill_result(
+                result=result,
+                prefix_input_ids=shared_prefixes[i],
+                full_input_ids=turn1_input_ids[i],
+                label=f"{label}[turn1][{i}]",
             )
 
         turn2_input_ids = [
@@ -386,12 +377,11 @@ class MambaReplayKLMixin:
 
         # Interleave branches from different shared trunks so the tree is exercised
         # under realistic multi-session progression instead of single-session replay.
-        interleaved_order = []
-        branch_stride = 3
-        num_groups = len(turn2_input_ids) // branch_stride
-        for branch_idx in range(branch_stride):
-            for group_idx in range(num_groups):
-                interleaved_order.append(group_idx * branch_stride + branch_idx)
+        interleaved_order = [
+            group_idx * 3 + branch_idx
+            for branch_idx in range(3)
+            for group_idx in range(len(turn2_input_ids) // 3)
+        ]
 
         ordered_turn2_inputs = [turn2_input_ids[i] for i in interleaved_order]
         turn2_results = _generate(
@@ -406,19 +396,11 @@ class MambaReplayKLMixin:
         output_logprobs = []
         for ordered_idx, result in enumerate(turn2_results):
             original_idx = interleaved_order[ordered_idx]
-            expected_cached_tokens = self._expected_decode_cached_tokens(
-                len(turn1_input_ids[original_idx]),
-                len(turn1_results[original_idx]["output_ids"]),
-            )
-            self._assert_exact_cached_tokens(
-                result,
-                expected_cached_tokens,
-                f"{label}[turn2][{original_idx}]",
-            )
-            self._assert_cache_hit(
-                result,
-                expected_cached_tokens,
-                f"{label}[turn2][{original_idx}]",
+            self._assert_decode_result(
+                result=result,
+                history_input_ids=turn1_input_ids[original_idx],
+                previous_output_ids=turn1_results[original_idx]["output_ids"],
+                label=f"{label}[turn2][{original_idx}]",
             )
             replay_item, output_logprobs_item = self._build_replay_item(
                 ordered_turn2_inputs[ordered_idx], result
@@ -430,6 +412,55 @@ class MambaReplayKLMixin:
             label=label,
             replay_input_ids=replay_input_ids,
             output_logprobs=output_logprobs,
+        )
+
+
+class MambaReplayKLMixin(HybridReplayKLMixinBase):
+    model = DEFAULT_HYBRID_MAMBA_MODEL_NAME_FOR_TEST
+    kl_div_thres = 0.0025
+    max_samples = 50
+    prefill_max_new_tokens = 256
+    decode_max_new_tokens = 256
+    replay_batch_size = 2
+    server_port_start = 32000
+    other_args = [
+        "--tp-size",
+        "2",
+        "--chunked-prefill-size",
+        "2048",
+        "--mamba-scheduler-strategy",
+        "extra_buffer",
+        "--mamba-track-interval",
+        MAMBA_TRACK_INTERVAL,
+        "--enable-hybrid-radix-tree",
+    ]
+
+    @classmethod
+    def _expected_prefill_cached_tokens(cls, prefix_len: int) -> int:
+        return (prefix_len // MAMBA_CACHE_CHUNK_SIZE) * MAMBA_CACHE_CHUNK_SIZE
+
+    @classmethod
+    def _expected_decode_cached_tokens(cls, history_len: int, output_len: int) -> int:
+        if output_len <= 0:
+            return history_len
+        seq_len = history_len + output_len - 1
+        return (seq_len // MAMBA_TRACK_INTERVAL) * MAMBA_TRACK_INTERVAL
+
+    def _assert_prefill_result(
+        self,
+        *,
+        result: dict,
+        prefix_input_ids: list[int],
+        full_input_ids: list[int],
+        label: str,
+    ) -> None:
+        expected_cached_tokens = self._expected_prefill_cached_tokens(
+            len(prefix_input_ids)
+        )
+        self._assert_prefill_cached_tokens_near_expected(
+            result,
+            expected_cached_tokens,
+            label,
         )
 
 
@@ -449,15 +480,14 @@ class TestHybridMambaReplayKL(MambaReplayKLMixin, unittest.TestCase):
             prefix_input_ids=prefix_input_ids,
             full_input_ids=full_input_ids,
             max_new_tokens=self.prefill_max_new_tokens,
-            min_cached_tokens=256,
         )
 
     def test_decode_replay_kl_with_branching_suffixes(self):
         input_ids = get_input_ids(
             tokenizer_path=self.model,
             max_prompt_tokens=1400,
-            num_samples=4,
-        )[:4]
+            num_samples=self.max_samples,
+        )[: self.max_samples]
         first_turn_input_ids, second_turn_suffixes = self._build_decode_branch_inputs(
             input_ids
         )
@@ -466,15 +496,15 @@ class TestHybridMambaReplayKL(MambaReplayKLMixin, unittest.TestCase):
             label="test_decode_replay_kl_with_branching_suffixes",
             first_turn_input_ids=first_turn_input_ids,
             second_turn_suffixes=second_turn_suffixes,
-            max_new_tokens=64,
+            max_new_tokens=self.decode_max_new_tokens,
         )
 
     def test_multiturn_replay_kl_with_interleaved_abc_branches(self):
         raw_input_ids = get_input_ids(
             tokenizer_path=self.model,
             max_prompt_tokens=2400,
-            num_samples=18,
-        )[:18]
+            num_samples=self.max_samples,
+        )[: self.max_samples]
         shared_prefixes, turn1_suffixes, turn2_suffixes = (
             self._build_multiturn_branch_inputs(raw_input_ids)
         )
@@ -484,7 +514,7 @@ class TestHybridMambaReplayKL(MambaReplayKLMixin, unittest.TestCase):
             shared_prefixes=shared_prefixes,
             turn1_suffixes=turn1_suffixes,
             turn2_suffixes=turn2_suffixes,
-            max_new_tokens=64,
+            max_new_tokens=self.decode_max_new_tokens,
         )
 
     def test_prefill_replay_kl_after_competing_branch_pressure(self):
@@ -565,6 +595,103 @@ class TestHybridMambaReplayKL(MambaReplayKLMixin, unittest.TestCase):
             label="test_prefill_replay_kl_after_competing_branch_pressure",
             replay_input_ids=list(replay_input_ids),
             output_logprobs=list(output_logprobs),
+        )
+
+
+class SWAReplayKLMixin(HybridReplayKLMixinBase):
+    model = DEFAULT_MODEL_NAME_FOR_TEST_MXFP4_WITH_MOE
+    kl_div_thres = 0.003
+    max_samples = 24
+    replay_batch_size = 1
+    decode_max_new_tokens = 256
+    server_port_start = 33000
+    other_args = [
+        "--tp-size",
+        "2",
+        "--mem-fraction-static",
+        "0.70",
+        "--disable-piecewise-cuda-graph",
+        "--random-seed",
+        "20260322",
+        "--enable-hybrid-radix-tree",
+    ]
+
+    @staticmethod
+    def _select_stable_inputs(
+        input_ids: list[list[int]],
+        *,
+        target_count: int,
+        min_len: int,
+        max_len: int,
+        target_len: int,
+    ) -> list[list[int]]:
+        filtered = [ids for ids in input_ids if min_len <= len(ids) <= max_len]
+        if len(filtered) < target_count:
+            filtered = sorted(input_ids, key=lambda ids: abs(len(ids) - target_len))
+        else:
+            filtered = sorted(filtered, key=lambda ids: abs(len(ids) - target_len))
+        return filtered[:target_count]
+
+    @staticmethod
+    def _build_branching_decode_inputs(
+        input_ids: list[list[int]],
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        base, step, min_suffix = 896, 16, 16
+        suffix_lens = [48, 64, 80, 96]
+        first_turn_input_ids = []
+        second_turn_suffixes = []
+        for i, ids in enumerate(input_ids):
+            first_turn_len = min(len(ids), base + i * step)
+            suffix_len = suffix_lens[i % len(suffix_lens)]
+            second_turn_suffix = ids[first_turn_len : first_turn_len + suffix_len]
+            if len(second_turn_suffix) < min_suffix:
+                second_turn_suffix = ids[:min_suffix]
+            first_turn_input_ids.append(ids[:first_turn_len])
+            second_turn_suffixes.append(second_turn_suffix)
+        return first_turn_input_ids, second_turn_suffixes
+
+
+class TestHybridSWAReplayKL(SWAReplayKLMixin, unittest.TestCase):
+    def test_decode_replay_kl_with_sliding_window_branching(self):
+        raw_input_ids = get_input_ids(
+            tokenizer_path=self.model,
+            max_prompt_tokens=1600,
+            num_samples=self.max_samples,
+        )[: self.max_samples]
+        input_ids = self._select_stable_inputs(
+            raw_input_ids,
+            target_count=self.max_samples,
+            min_len=1200,
+            max_len=2400,
+            target_len=1600,
+        )
+        first_turn_input_ids, second_turn_suffixes = (
+            self._build_branching_decode_inputs(input_ids)
+        )
+
+        self._run_decode_replay_case(
+            label="test_decode_replay_kl_with_sliding_window_branching",
+            first_turn_input_ids=first_turn_input_ids,
+            second_turn_suffixes=second_turn_suffixes,
+            max_new_tokens=self.decode_max_new_tokens,
+        )
+
+    def test_multiturn_replay_kl_with_interleaved_abc_branches(self):
+        raw_input_ids = get_input_ids(
+            tokenizer_path=self.model,
+            max_prompt_tokens=2400,
+            num_samples=self.max_samples,
+        )[: self.max_samples]
+        shared_prefixes, turn1_suffixes, turn2_suffixes = (
+            self._build_multiturn_branch_inputs(raw_input_ids)
+        )
+
+        self._run_multiturn_branching_replay_case(
+            label="test_multiturn_replay_kl_with_interleaved_abc_branches",
+            shared_prefixes=shared_prefixes,
+            turn1_suffixes=turn1_suffixes,
+            turn2_suffixes=turn2_suffixes,
+            max_new_tokens=self.decode_max_new_tokens,
         )
 
 
