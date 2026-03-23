@@ -99,65 +99,16 @@ class WhisperAttention(torch.nn.Module):
                 kv, _ = self.kv_proj(cross_hidden_states)
                 k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
             else:
-                k = torch.zeros_like(q)
-                v = torch.zeros_like(q)
+                k = None
+                v = None
 
             q = q * self.scaling
-            num_heads = self.attn.tp_q_head_num
-            head_dim = self.attn.head_dim
+            q = q.view(-1, self.attn.tp_q_head_num, self.attn.head_dim)
+            if k is not None:
+                k = k.view(-1, self.attn.tp_k_head_num, self.attn.qk_head_dim)
+                v = v.view(-1, self.attn.tp_v_head_num, self.attn.v_head_dim)
 
-            q = q.view(-1, num_heads, head_dim)
-            k = k.view(-1, num_heads, head_dim)
-            v = v.view(-1, num_heads, head_dim)
-
-            q_len = q.shape[0]
-            kv_len = k.shape[0]
-
-            q = q.transpose(0, 1)
-            k = k.transpose(0, 1)
-            v = v.transpose(0, 1)
-
-            attn_weights = torch.bmm(q, k.transpose(1, 2))
-
-            # Apply block-diagonal mask for batched cross-attention
-            batch_size = forward_batch.batch_size if forward_batch else 1
-            if batch_size > 1 and kv_len > 0:
-                encoder_len_per_request = kv_len // batch_size
-                if encoder_len_per_request * batch_size == kv_len:
-                    is_decode = forward_batch.forward_mode.is_decode()
-                    if is_decode:
-                        mask = torch.zeros(
-                            (q_len, kv_len), device=q.device, dtype=torch.bool
-                        )
-                        for i in range(batch_size):
-                            enc_start = i * encoder_len_per_request
-                            enc_end = (i + 1) * encoder_len_per_request
-                            mask[i, enc_start:enc_end] = True
-                        attn_weights = attn_weights.masked_fill(
-                            ~mask.unsqueeze(0), float("-inf")
-                        )
-                    else:
-                        seq_lens = forward_batch.seq_lens
-                        if seq_lens is not None and len(seq_lens) == batch_size:
-                            seq_lens_list = seq_lens.tolist()
-                            mask = torch.zeros(
-                                (q_len, kv_len), device=q.device, dtype=torch.bool
-                            )
-                            q_start = 0
-                            for i, dec_len in enumerate(seq_lens_list):
-                                enc_start = i * encoder_len_per_request
-                                enc_end = (i + 1) * encoder_len_per_request
-                                q_end = q_start + dec_len
-                                mask[q_start:q_end, enc_start:enc_end] = True
-                                q_start = q_end
-                            attn_weights = attn_weights.masked_fill(
-                                ~mask.unsqueeze(0), float("-inf")
-                            )
-
-            attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
-            attn_output = torch.bmm(attn_weights, v)
-            attn_output = attn_output.transpose(0, 1)
-            attn_output = attn_output.reshape(q_len, num_heads * head_dim)
+            attn_output = self.attn(q, k, v, forward_batch)
         else:
             qkv, _ = self.qkv_proj(hidden_states)
             q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -313,7 +264,6 @@ class WhisperDecoderLayer(torch.nn.Module):
 
 
 class WhisperEncoder(torch.nn.Module):
-
     def __init__(
         self, config: WhisperConfig, quant_config: Optional[QuantizationConfig] = None
     ):
@@ -361,7 +311,6 @@ class WhisperEncoder(torch.nn.Module):
 
 
 class WhisperDecoder(torch.nn.Module):
-
     def __init__(
         self, config: WhisperConfig, quant_config: Optional[QuantizationConfig] = None
     ):
@@ -408,7 +357,6 @@ class WhisperDecoder(torch.nn.Module):
 
 
 class WhisperForConditionalGeneration(torch.nn.Module):
-
     def __init__(
         self, config: WhisperConfig, quant_config: Optional[QuantizationConfig] = None
     ):
@@ -420,7 +368,6 @@ class WhisperForConditionalGeneration(torch.nn.Module):
         )
         self.logits_processor = LogitsProcessor(config)
         self.config = config
-        self._encoder_cache = {}
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -468,8 +415,74 @@ class WhisperForConditionalGeneration(torch.nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
 
-    def pad_input_ids(self, input_ids: List[int], _mm_inputs: MultimodalInputs):
-        return input_ids
+    def _get_encoder_len(self, mm_inputs: Optional[MultimodalInputs]) -> int:
+        if mm_inputs is None or not mm_inputs.mm_items:
+            return 0
+        return self.config.max_source_positions
+
+    def _batch_audio_inputs(
+        self, forward_batch: ForwardBatch
+    ) -> tuple[Optional[torch.Tensor], List[int]]:
+        if (
+            forward_batch.forward_mode.is_decode()
+            or not forward_batch.mm_inputs
+            or all(forward_batch.encoder_cached)
+        ):
+            return None, []
+
+        batched_features = []
+        encoder_lens_need = []
+        for i, mm_input in enumerate(forward_batch.mm_inputs):
+            if (
+                forward_batch.encoder_cached[i]
+                or mm_input is None
+                or not mm_input.mm_items
+            ):
+                continue
+
+            features = mm_input.mm_items[0].feature
+            if features.ndim == 2:
+                features = features.unsqueeze(0)
+
+            batched_features.append(features)
+            encoder_lens_need.append(int(forward_batch.encoder_lens[i].item()))
+
+        if not batched_features:
+            return None, []
+
+        return torch.cat(batched_features, dim=0), encoder_lens_need
+
+    def _flatten_encoder_outputs(
+        self, encoder_outputs: torch.Tensor, encoder_lens_need: List[int]
+    ) -> torch.Tensor:
+        hidden_size = encoder_outputs.shape[-1]
+        total_encoder_len = sum(encoder_lens_need)
+        encoder_outputs_flat = torch.zeros(
+            total_encoder_len,
+            hidden_size,
+            device=encoder_outputs.device,
+            dtype=encoder_outputs.dtype,
+        )
+
+        i = start_pos = 0
+        for encoder_len in encoder_lens_need:
+            if encoder_len == 0:
+                continue
+            end_pos = start_pos + encoder_len
+            encoder_outputs_flat[start_pos:end_pos] = encoder_outputs[i, :encoder_len]
+            i += 1
+            start_pos += encoder_len
+
+        return encoder_outputs_flat
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        encoder_len = self._get_encoder_len(mm_inputs)
+        if encoder_len == 0:
+            return input_ids
+
+        mm_inputs.num_image_tokens = encoder_len
+        pad_id = self.config.pad_token_id if self.config.pad_token_id is not None else 0
+        return [pad_id] * encoder_len + input_ids
 
     def forward(
         self,
@@ -479,52 +492,23 @@ class WhisperForConditionalGeneration(torch.nn.Module):
         **kwargs: Any,
     ) -> LogitsProcessorOutput:
         dtype = self.encoder.conv1.weight.dtype
-        is_decode = forward_batch.forward_mode.is_decode()
-
-        if is_decode:
-            encoder_outputs = None
-            if forward_batch.req_pool_indices is not None:
-                req_indices = forward_batch.req_pool_indices.tolist()
-                encoder_list = []
-                for req_idx in req_indices:
-                    if req_idx in self._encoder_cache:
-                        encoder_list.append(self._encoder_cache[req_idx])
-                if encoder_list:
-                    encoder_outputs = torch.cat(encoder_list, dim=0)
-        else:
-            encoder_list = []
-            mm_inputs_list = forward_batch.mm_inputs if forward_batch.mm_inputs else []
-            req_indices = (
-                forward_batch.req_pool_indices.tolist()
-                if forward_batch.req_pool_indices is not None
-                else []
+        encoder_outputs = None
+        batched_audio_features, encoder_lens_need = self._batch_audio_inputs(
+            forward_batch
+        )
+        if batched_audio_features is not None:
+            encoder_position_ids = torch.arange(
+                self.config.max_source_positions,
+                device=batched_audio_features.device,
             )
-
-            for req_idx, mm_input in zip(req_indices, mm_inputs_list):
-                if mm_input is None or not mm_input.mm_items:
-                    continue
-
-                features = mm_input.mm_items[0].feature
-                if features.ndim == 2:
-                    features = features.unsqueeze(0)
-
-                encoder_len = features.shape[-1] // 2
-                encoder_position_ids = torch.arange(encoder_len).to(
-                    features.device, non_blocking=True
-                )
-
-                req_encoder_outputs = self.encoder(
-                    features.to(dtype), encoder_position_ids, forward_batch
-                )
-                req_encoder_outputs = req_encoder_outputs.squeeze(0)
-
-                self._encoder_cache[req_idx] = req_encoder_outputs
-                encoder_list.append(req_encoder_outputs)
-
-            if encoder_list:
-                encoder_outputs = torch.cat(encoder_list, dim=0)
-            else:
-                encoder_outputs = None
+            encoder_outputs = self.encoder(
+                batched_audio_features.to(dtype),
+                encoder_position_ids,
+                forward_batch,
+            )
+            encoder_outputs = self._flatten_encoder_outputs(
+                encoder_outputs, encoder_lens_need
+            )
 
         decoder_outputs = self.decoder(
             input_ids, encoder_outputs, forward_batch, positions

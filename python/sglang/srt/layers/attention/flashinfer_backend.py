@@ -1053,11 +1053,17 @@ class FlashInferIndicesUpdaterDecode:
                 # Normal attention
                 paged_kernel_lens = seq_lens
                 kv_start_idx = encoder_lens
+                paged_kernel_lens_cpu = seq_lens_cpu
             else:
                 # Cross attention
                 paged_kernel_lens = encoder_lens
                 kv_start_idx = torch.zeros_like(encoder_lens)
                 seq_lens_sum = encoder_lens.sum().item()
+                paged_kernel_lens_cpu = (
+                    encoder_lens.to(device="cpu", non_blocking=False)
+                    if encoder_lens is not None
+                    else None
+                )
 
             self.call_begin_forward(
                 decode_wrappers[wrapper_id],
@@ -1067,7 +1073,7 @@ class FlashInferIndicesUpdaterDecode:
                 self.kv_indptr[wrapper_id],
                 kv_start_idx,
                 spec_info,
-                seq_lens_cpu=seq_lens_cpu,
+                seq_lens_cpu=paged_kernel_lens_cpu,
             )
 
     def call_begin_forward(

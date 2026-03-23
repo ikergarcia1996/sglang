@@ -2256,12 +2256,30 @@ class ServerArgs:
                 self.speculative_algorithm is None
             ), "Speculative decoding is currently not supported with Flex Attention backend"
 
-        # Encoder-decoder models (e.g., Whisper)
+        # Whisper currently only supports cuda graph on the native flashinfer
+        # cross-attention path.
         if model_config.is_encoder_decoder:
-            logger.warning(
-                "Cuda graph is disabled for encoder-decoder models (e.g., Whisper)"
+            model_architectures = model_config.hf_config.architectures or []
+            is_whisper = "WhisperForConditionalGeneration" in model_architectures
+            effective_prefill_backend = (
+                self.prefill_attention_backend or self.attention_backend
             )
-            self.disable_cuda_graph = True
+            effective_decode_backend = (
+                self.decode_attention_backend or self.attention_backend
+            )
+            if not is_whisper:
+                logger.warning(
+                    "Cuda graph is disabled for non-Whisper encoder-decoder models"
+                )
+                self.disable_cuda_graph = True
+            elif (
+                effective_prefill_backend != "flashinfer"
+                or effective_decode_backend != "flashinfer"
+            ):
+                logger.warning(
+                    "Cuda graph is disabled for Whisper unless both prefill and decode attention backends are flashinfer"
+                )
+                self.disable_cuda_graph = True
 
         # Major NVIDIA platforms backends
         if (
