@@ -17,12 +17,16 @@ class Fp4GemmRunnerBackend(Enum):
     """Enum for FP4 GEMM runner backend selection."""
 
     AUTO = "auto"
+    CUTLASS = "cutlass"
     FLASHINFER_CUDNN = "flashinfer_cudnn"
     FLASHINFER_CUTLASS = "flashinfer_cutlass"
     FLASHINFER_TRTLLM = "flashinfer_trtllm"
 
     def is_auto(self) -> bool:
         return self == Fp4GemmRunnerBackend.AUTO
+
+    def is_cutlass(self) -> bool:
+        return self == Fp4GemmRunnerBackend.CUTLASS
 
     def is_flashinfer_cudnn(self) -> bool:
         return self == Fp4GemmRunnerBackend.FLASHINFER_CUDNN
