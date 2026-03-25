@@ -2115,10 +2115,10 @@ class SGLangFailuresAnalyzer:
                     )
                     summary_lines.append("")
                     summary_lines.append(
-                        "| Machine Name | Current Streak | Max | Fail Rate | Avg Queue | Total Jobs | Unique Jobs | Jobs |"
+                        "| Machine Name | Current Streak | Max | Fail Rate | Avg Queue | Total Jobs | Failed Jobs | Unique Jobs | Jobs |"
                     )
                     summary_lines.append(
-                        "|--------------|----------------|-----|-----------|-----------|------------|-------------|------|"
+                        "|--------------|----------------|-----|-----------|-----------|------------|-------------|-------------|------|"
                     )
 
                     for runner_data in runners_with_streak[:15]:
@@ -2135,6 +2135,7 @@ class SGLangFailuresAnalyzer:
                         )
 
                         all_failures = runner_data.get("all_failures_in_streak", [])
+                        failed_jobs_count = len(all_failures)
                         jobs_str = (
                             " ".join(
                                 f"[#{f.get('run_number', '?')}]({f.get('job_url', f['url'])})"
@@ -2148,12 +2149,12 @@ class SGLangFailuresAnalyzer:
                         if runner_data["current_streak"] >= 3:
                             summary_lines.append(
                                 f"| <span style='color:red'>`{display_name}`</span> | <span style='color:red'>{runner_data['current_streak']}</span> | <span style='color:red'>{runner_data['max_streak']}</span> | "
-                                f"<span style='color:red'>{runner_data['failure_rate']:.1f}%</span> | <span style='color:red'>{avg_queue_str}</span> | <span style='color:red'>{runner_data['total_jobs']}</span> | <span style='color:red'>{runner_data.get('unique_jobs', 0)}</span> | <span style='color:red'>{jobs_str}</span> |"
+                                f"<span style='color:red'>{runner_data['failure_rate']:.1f}%</span> | <span style='color:red'>{avg_queue_str}</span> | <span style='color:red'>{runner_data['total_jobs']}</span> | <span style='color:red'>{failed_jobs_count}</span> | <span style='color:red'>{runner_data.get('unique_jobs', 0)}</span> | <span style='color:red'>{jobs_str}</span> |"
                             )
                         else:
                             summary_lines.append(
                                 f"| `{display_name}` | {runner_data['current_streak']} | {runner_data['max_streak']} | "
-                                f"{runner_data['failure_rate']:.1f}% | {avg_queue_str} | {runner_data['total_jobs']} | {runner_data.get('unique_jobs', 0)} | {jobs_str} |"
+                                f"{runner_data['failure_rate']:.1f}% | {avg_queue_str} | {runner_data['total_jobs']} | {failed_jobs_count} | {runner_data.get('unique_jobs', 0)} | {jobs_str} |"
                             )
 
                     summary_lines.append("")
@@ -2165,10 +2166,10 @@ class SGLangFailuresAnalyzer:
                     )
                     summary_lines.append("")
                     summary_lines.append(
-                        "| Machine Name | Fail Rate | Avg Queue | Total Jobs | Unique Jobs | Jobs |"
+                        "| Machine Name | Fail Rate | Avg Queue | Total Jobs | Failed Jobs | Unique Jobs | Jobs |"
                     )
                     summary_lines.append(
-                        "|--------------|-----------|-----------|------------|-------------|------|"
+                        "|--------------|-----------|-----------|------------|-------------|-------------|------|"
                     )
 
                     for runner_data in runners_high_fail_rate[:15]:
@@ -2185,6 +2186,7 @@ class SGLangFailuresAnalyzer:
                         )
 
                         all_failures = runner_data.get("all_failures", [])
+                        failed_jobs_count = len(all_failures)
                         jobs_str = (
                             " ".join(
                                 f"[#{f.get('run_number', '?')}]({f.get('job_url', f['url'])})"
@@ -2197,7 +2199,7 @@ class SGLangFailuresAnalyzer:
                         summary_lines.append(
                             f"| <span style='color:orange'>`{display_name}`</span> | <span style='color:orange'>{runner_data['failure_rate']:.1f}%</span> | "
                             f"<span style='color:orange'>{avg_queue_str}</span> | <span style='color:orange'>{runner_data['total_jobs']}</span> | "
-                            f"<span style='color:orange'>{runner_data.get('unique_jobs', 0)}</span> | <span style='color:orange'>{jobs_str}</span> |"
+                            f"<span style='color:orange'>{failed_jobs_count}</span> | <span style='color:orange'>{runner_data.get('unique_jobs', 0)}</span> | <span style='color:orange'>{jobs_str}</span> |"
                         )
 
                     summary_lines.append("")
