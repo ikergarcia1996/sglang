@@ -91,7 +91,10 @@ runs:
               apiCalls++;
               const rateRemaining = response.headers['x-ratelimit-remaining'] || '?';
               const rateLimit = response.headers['x-ratelimit-limit'] || '?';
-              console.log(`[rate-limit] ${rateRemaining}/${rateLimit} remaining (ETag: ${lastEtag ? 'sent' : 'none'}) | this session: ${apiCalls} paid, ${cachedCalls} free`);
+              const rateUsed = response.headers['x-ratelimit-used'] || '?';
+              const rateResource = response.headers['x-ratelimit-resource'] || '?';
+              const rateReset = response.headers['x-ratelimit-reset'] || '?';
+              console.log(`[rate-limit] ${rateRemaining}/${rateLimit} remaining (used=${rateUsed}, resource=${rateResource}, reset=${rateReset}, ETag: ${lastEtag ? 'sent' : 'none'}) | this session: ${apiCalls} paid, ${cachedCalls} free`);
               lastEtag = response.headers.etag || '';
               const jobs = response.data.jobs;
 
