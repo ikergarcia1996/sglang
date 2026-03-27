@@ -84,10 +84,7 @@ def _report_bandwidth(input_sl, head, dim, dtype):
     def fmt(ms):
         return f"{ms*1000:6.2f}us {total_bytes/(ms*1e-3)/1e9:6.0f}GB/s"
 
-    print(
-        f"  sl={input_sl:5d}  h={head:2d}  d={dim:4d}"
-        f"  |  jit {fmt(jit_ms)}"
-    )
+    print(f"  sl={input_sl:5d}  h={head:2d}  d={dim:4d}" f"  |  jit {fmt(jit_ms)}")
 
 
 def report_bandwidth():

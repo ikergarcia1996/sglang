@@ -43,7 +43,6 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
       "top_k_top_p_sampling_from_probs(Tensor probs, Tensor output, Tensor? maybe_indices, Tensor? maybe_top_k_arr, "
       "float top_k_val, Tensor? maybe_top_p_arr, float top_p_val, bool deterministic, Generator? gen) -> ()");
   m.impl("top_k_top_p_sampling_from_probs", torch::kMUSA, &top_k_top_p_sampling_from_probs);
-
 }
 
 REGISTER_EXTENSION(common_ops)
