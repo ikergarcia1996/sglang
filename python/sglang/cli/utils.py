@@ -5,31 +5,18 @@ import subprocess
 from functools import lru_cache
 
 from sglang.srt.environ import envs
+from sglang.utils import has_diffusion_overlay_registry_match, load_diffusion_overlay_registry_from_env
 
 logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
 def _load_overlay_registry() -> dict:
-    raw_value = os.getenv("SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY", "").strip()
-    if not raw_value:
-        return {}
-    if raw_value.startswith("{"):
-        payload = json.loads(raw_value)
-    else:
-        with open(os.path.expanduser(raw_value), encoding="utf-8") as f:
-            payload = json.load(f)
-    return payload if isinstance(payload, dict) else {}
+    return load_diffusion_overlay_registry_from_env()
 
 
 def _is_overlay_diffusion_model(model_path: str) -> bool:
-    registry = _load_overlay_registry()
-    if model_path in registry:
-        return True
-    if not os.path.exists(model_path):
-        return False
-    base_name = os.path.basename(os.path.normpath(model_path))
-    return any(base_name == key.rsplit("/", 1)[-1] for key in registry)
+    return has_diffusion_overlay_registry_match(model_path, _load_overlay_registry())
 
 
 def _is_diffusers_model_dir(model_dir: str) -> bool:

@@ -19,6 +19,7 @@ from requests.exceptions import RequestException
 
 from sglang.multimodal_gen.runtime.loader.weight_utils import get_lock
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.utils import load_diffusion_overlay_registry_from_env
 
 logger = init_logger(__name__)
 
@@ -60,28 +61,12 @@ def _load_model_overlay_registry() -> dict[str, dict[str, Any]]:
     # Built-in registry is the stable default path; env only overrides it.
     normalized = _normalize_model_overlay_registry(BUILTIN_MODEL_OVERLAY_REGISTRY)
 
-    raw_value = os.getenv("SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY", "").strip()
-    if not raw_value:
+    env_registry = load_diffusion_overlay_registry_from_env()
+    if not env_registry:
         _MODEL_OVERLAY_REGISTRY_CACHE = normalized
         return _MODEL_OVERLAY_REGISTRY_CACHE
 
-    try:
-        if raw_value.startswith("{"):
-            payload = json.loads(raw_value)
-        else:
-            with open(os.path.expanduser(raw_value), encoding="utf-8") as f:
-                payload = json.load(f)
-    except Exception as exc:
-        raise ValueError(
-            "Failed to parse SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY"
-        ) from exc
-
-    if not isinstance(payload, dict):
-        raise ValueError(
-            "SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY must be a JSON object"
-        )
-
-    normalized.update(_normalize_model_overlay_registry(payload))
+    normalized.update(_normalize_model_overlay_registry(env_registry))
     _MODEL_OVERLAY_REGISTRY_CACHE = normalized
     return _MODEL_OVERLAY_REGISTRY_CACHE
 
