@@ -8,13 +8,11 @@ from sglang.srt.environ import envs
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1)
 def _is_overlay_diffusion_model(model_path: str) -> bool:
-    try:
-        from sglang.multimodal_gen.runtime.utils.model_overlay import (
-            resolve_model_overlay_target,
-        )
-    except ImportError:
-        return False
+    from sglang.multimodal_gen.runtime.utils.model_overlay import (
+        resolve_model_overlay_target,
+    )
     return resolve_model_overlay_target(model_path) is not None
 
 
@@ -45,15 +43,14 @@ def get_is_diffusion_model(model_path: str) -> bool:
     except ImportError:
         is_known_non_diffusers_multimodal_model = lambda _: False
 
+    if _is_overlay_diffusion_model(model_path):
+        # short-circuit, if applicable for the overlay mechanism (diffusion-only)
+        return True
+
     if os.path.isdir(model_path):
         if _is_diffusers_model_dir(model_path):
             return True
-        if _is_overlay_diffusion_model(model_path):
-            return True
         return is_known_non_diffusers_multimodal_model(model_path)
-
-    if _is_overlay_diffusion_model(model_path):
-        return True
 
     if is_known_non_diffusers_multimodal_model(model_path):
         return True
