@@ -42,8 +42,6 @@ def get_is_diffusion_model(model_path: str) -> bool:
     Returns False on any failure (network error, 404, offline mode, etc.)
     so that the caller falls through to the standard LLM server path.
     """
-    from sglang.multimodal_gen.registry import is_known_non_diffusers_multimodal_model
-
     if _is_overlay_diffusion_model(model_path):
         # short-circuit, if applicable for the overlay mechanism (diffusion-only)
         return True
@@ -51,10 +49,7 @@ def get_is_diffusion_model(model_path: str) -> bool:
     if os.path.isdir(model_path):
         if _is_diffusers_model_dir(model_path):
             return True
-        return is_known_non_diffusers_multimodal_model(model_path)
-
-    if is_known_non_diffusers_multimodal_model(model_path):
-        return True
+        return False
 
     try:
         if envs.SGLANG_USE_MODELSCOPE.get():
