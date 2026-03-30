@@ -10,12 +10,26 @@ logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
-def _is_overlay_diffusion_model(model_path: str) -> bool:
-    from sglang.multimodal_gen.runtime.utils.model_overlay import (
-        resolve_model_overlay_target,
-    )
+def _load_overlay_registry() -> dict:
+    raw_value = os.getenv("SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY", "").strip()
+    if not raw_value:
+        return {}
+    if raw_value.startswith("{"):
+        payload = json.loads(raw_value)
+    else:
+        with open(os.path.expanduser(raw_value), encoding="utf-8") as f:
+            payload = json.load(f)
+    return payload if isinstance(payload, dict) else {}
 
-    return resolve_model_overlay_target(model_path) is not None
+
+def _is_overlay_diffusion_model(model_path: str) -> bool:
+    registry = _load_overlay_registry()
+    if model_path in registry:
+        return True
+    if not os.path.exists(model_path):
+        return False
+    base_name = os.path.basename(os.path.normpath(model_path))
+    return any(base_name == key.rsplit("/", 1)[-1] for key in registry)
 
 
 def _is_diffusers_model_dir(model_dir: str) -> bool:
@@ -38,12 +52,7 @@ def get_is_diffusion_model(model_path: str) -> bool:
     Returns False on any failure (network error, 404, offline mode, etc.)
     so that the caller falls through to the standard LLM server path.
     """
-    try:
-        from sglang.multimodal_gen.registry import (
-            is_known_non_diffusers_multimodal_model,
-        )
-    except ImportError:
-        is_known_non_diffusers_multimodal_model = lambda _: False
+    from sglang.multimodal_gen.registry import is_known_non_diffusers_multimodal_model
 
     if _is_overlay_diffusion_model(model_path):
         # short-circuit, if applicable for the overlay mechanism (diffusion-only)
