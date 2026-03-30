@@ -5,7 +5,10 @@ import subprocess
 from functools import lru_cache
 
 from sglang.srt.environ import envs
-from sglang.utils import has_diffusion_overlay_registry_match, load_diffusion_overlay_registry_from_env
+from sglang.utils import (
+    has_diffusion_overlay_registry_match,
+    load_diffusion_overlay_registry_from_env,
+)
 
 logger = logging.getLogger(__name__)
 
