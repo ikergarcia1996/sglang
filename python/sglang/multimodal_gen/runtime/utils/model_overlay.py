@@ -23,8 +23,12 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 # Built-in diffusion model overlay registry.
-# Keep this empty until concrete overlay repos are ready to ship.
-BUILTIN_MODEL_OVERLAY_REGISTRY: dict[str, dict[str, Any]] = {}
+BUILTIN_MODEL_OVERLAY_REGISTRY: dict[str, dict[str, Any]] = {
+    "Wan-AI/Wan2.2-S2V-14B": {
+        "overlay_repo_id": "MickJ/Wan2.2-S2V-14B-overlay",
+        "overlay_revision": "main",
+    }
+}
 
 
 MODEL_OVERLAY_METADATA_PATTERNS = [
@@ -462,11 +466,23 @@ def materialize_overlay_model(
         ):
             return final_dir
 
+        logger.info(
+            "Materializing overlay model for %s into %s",
+            source_model_id,
+            final_dir,
+        )
+        logger.info(
+            "Overlay source repo: %s, overlay repo: %s@%s",
+            source_model_id,
+            overlay_repo_id,
+            overlay_revision,
+        )
         tmp_dir = final_dir + ".tmp"
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
         if os.path.exists(final_dir):
             shutil.rmtree(final_dir)
+        logger.info("Copying overlay metadata into temporary materialized directory")
         shutil.copytree(
             overlay_dir,
             tmp_dir,
@@ -479,10 +495,16 @@ def materialize_overlay_model(
 
         file_mappings = manifest.get("file_mappings", [])
         if file_mappings:
+            logger.info("Applying %d overlay file mappings", len(file_mappings))
             _apply_overlay_file_mappings(
                 source_dir=source_dir,
                 output_dir=tmp_dir,
                 file_mappings=cast(list[dict[str, Any]], file_mappings),
+            )
+        if manifest.get("custom_materializer"):
+            logger.info(
+                "Running custom overlay materializer: %s",
+                manifest["custom_materializer"],
             )
         _run_overlay_custom_materializer(
             overlay_dir=overlay_dir,
@@ -506,6 +528,7 @@ def materialize_overlay_model(
             )
 
         os.replace(tmp_dir, final_dir)
+        logger.info("Overlay materialization finished: %s", final_dir)
 
     return final_dir
 

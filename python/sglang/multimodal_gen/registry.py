@@ -122,7 +122,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import 
 )
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     maybe_download_model_index,
-    verify_model_config_and_directory,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -327,10 +326,7 @@ def _get_config_info(
             return _CONFIG_REGISTRY.get(model_id)
 
     # 3. Use detectors
-    if os.path.exists(model_path):
-        config = verify_model_config_and_directory(model_path)
-    else:
-        config = maybe_download_model_index(model_path)
+    config = maybe_download_model_index(model_path)
     pipeline_name = config.get("_class_name", "").lower()
 
     matched_model_names = []
@@ -499,10 +495,7 @@ def get_model_info(
     else:
         # Try to get from model_index.json
         try:
-            if os.path.exists(model_path):
-                config = verify_model_config_and_directory(model_path)
-            else:
-                config = maybe_download_model_index(model_path)
+            config = maybe_download_model_index(model_path)
         except Exception as e:
             logger.error(f"Could not read model config for '{model_path}': {e}")
             if backend == Backend.AUTO:
