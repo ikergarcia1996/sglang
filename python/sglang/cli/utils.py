@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import subprocess
@@ -13,6 +14,7 @@ def _is_overlay_diffusion_model(model_path: str) -> bool:
     from sglang.multimodal_gen.runtime.utils.model_overlay import (
         resolve_model_overlay_target,
     )
+
     return resolve_model_overlay_target(model_path) is not None
 
 
