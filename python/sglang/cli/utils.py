@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import subprocess
@@ -9,42 +8,14 @@ from sglang.srt.environ import envs
 logger = logging.getLogger(__name__)
 
 
-_BUILTIN_DIFFUSION_OVERLAY_REGISTRY = {
-    "Wan-AI/Wan2.2-S2V-14B": {
-        "overlay_repo_id": "MickJ/Wan2.2-S2V-14B-overlay",
-        "overlay_revision": "main",
-    }
-}
-
-
-def _load_diffusion_overlay_registry() -> dict[str, dict]:
-    registry = dict(_BUILTIN_DIFFUSION_OVERLAY_REGISTRY)
-    raw_value = os.getenv("SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY", "").strip()
-    if not raw_value:
-        return registry
-
-    if raw_value.startswith("{"):
-        payload = json.loads(raw_value)
-    else:
-        with open(os.path.expanduser(raw_value), encoding="utf-8") as f:
-            payload = json.load(f)
-
-    for source_model_id, spec in payload.items():
-        if isinstance(spec, str):
-            registry[source_model_id] = {"overlay_repo_id": spec}
-        elif isinstance(spec, dict) and spec.get("overlay_repo_id"):
-            registry[source_model_id] = dict(spec)
-    return registry
-
-
-def _has_diffusion_overlay_target(model_path: str) -> bool:
-    registry = _load_diffusion_overlay_registry()
-    if model_path in registry:
-        return True
-    if os.path.exists(model_path):
-        base_name = os.path.basename(os.path.normpath(model_path))
-        return any(base_name == key.rsplit("/", 1)[-1] for key in registry)
-    return False
+def _is_overlay_diffusion_model(model_path: str) -> bool:
+    try:
+        from sglang.multimodal_gen.runtime.utils.model_overlay import (
+            resolve_model_overlay_target,
+        )
+    except ImportError:
+        return False
+    return resolve_model_overlay_target(model_path) is not None
 
 
 def _is_diffusers_model_dir(model_dir: str) -> bool:
@@ -77,11 +48,11 @@ def get_is_diffusion_model(model_path: str) -> bool:
     if os.path.isdir(model_path):
         if _is_diffusers_model_dir(model_path):
             return True
-        if _has_diffusion_overlay_target(model_path):
+        if _is_overlay_diffusion_model(model_path):
             return True
         return is_known_non_diffusers_multimodal_model(model_path)
 
-    if _has_diffusion_overlay_target(model_path):
+    if _is_overlay_diffusion_model(model_path):
         return True
 
     if is_known_non_diffusers_multimodal_model(model_path):
