@@ -7,6 +7,7 @@ from functools import lru_cache
 from sglang.srt.environ import envs
 from sglang.utils import (
     has_diffusion_overlay_registry_match,
+    is_known_non_diffusers_diffusion_model,
     load_diffusion_overlay_registry_from_env,
 )
 
@@ -49,7 +50,10 @@ def get_is_diffusion_model(model_path: str) -> bool:
     if os.path.isdir(model_path):
         if _is_diffusers_model_dir(model_path):
             return True
-        return False
+        return is_known_non_diffusers_diffusion_model(model_path)
+
+    if is_known_non_diffusers_diffusion_model(model_path):
+        return True
 
     try:
         if envs.SGLANG_USE_MODELSCOPE.get():
